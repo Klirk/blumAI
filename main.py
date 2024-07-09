@@ -1,112 +1,162 @@
 import threading
-import tkinter as tk
+import time
+from multiprocessing import Process, Manager, Event
 
 import cv2
 import keyboard
-import mss
-import numpy as np
-import pyautogui
 import pygetwindow as gw
+from pynput.mouse import Button
+from pynput.mouse import Controller as MouseController
 from ultralytics import YOLO
 
+obs_camera_url = 1
 
-class BotApp:
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Bot Controller")
+class FPS:
+    def __init__(self):
+        self.start_time = time.time()
+        self.frames = 0
+        self.current_fps = 0
 
-        # Установка ширины окна
-        self.root.geometry("200x100")  # Измените ширину и высоту по своему усмотрению
+    def update(self):
+        self.frames += 1
+        elapsed_time = time.time() - self.start_time
+        if (elapsed_time >= 1):
+            self.current_fps = self.frames / elapsed_time
+            self.start_time = time.time()
+            self.frames = 0
+        return self.current_fps
 
-        self.start_button = tk.Button(root, text="Start - F5", command=self.start_bot, width=20)
-        self.start_button.pack(pady=10)
 
-        self.stop_button = tk.Button(root, text="Stop - F6", command=self.stop_bot, width=20)
-        self.stop_button.pack(pady=10)
+model = YOLO("best.pt")
 
-        self.running = False
-        self.setup_hotkeys()
-        self.window_title_start = "TelegramDesktop"
-        self.window = None
-        self.model = YOLO("best.pt")  # Загрузка обученной модели
 
-    def setup_hotkeys(self):
-        keyboard.add_hotkey('F5', self.start_bot)
-        keyboard.add_hotkey('F6', self.stop_bot)
+def detect_stars(queue, stop_event):
+    cap = cv2.VideoCapture(obs_camera_url)
 
-    def find_window(self):
-        windows = gw.getAllTitles()
-        print("All windows:", windows)  # Output all window titles for debugging
-        for window in windows:
-            if window.startswith(self.window_title_start):
-                return gw.getWindowsWithTitle(window)[0]
-        return None
+    if not cap.isOpened():
+        print("Video stream not opened.")
+        exit()
 
-    def capture_screen(self, bbox):
-        with mss.mss() as sct:
-            screenshot = sct.grab(bbox)
-            img = np.array(screenshot)
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)  # Convert from BGRA to BGR
-            return img
+    fps_counter = FPS()
 
-    def click_on_particles(self, objects, bbox):
-        # Sort objects by their y-coordinate (closer to bottom first)
-        objects = sorted(objects, key=lambda obj: obj['box'][3], reverse=True)
+    while not stop_event.is_set():
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to read frame.")
+            break
 
-        for obj in objects:
-            name = obj['name']
-            x1, y1, x2, y2 = obj['box']
+        frame_resized = cv2.resize(frame, (1920, 1080))
 
-            if name == 'star':
-                # Calculate the center of the bounding box
-                cx = bbox[0] + (x1 + x2) // 2
-                cy = bbox[1] + (y1 + y2) // 2
-                pyautogui.click(cx, cy, interval=0.0)
-                break  # Click only on the closest star to the bottom
+        frame_cropped = frame_resized[:1080 - 368, :1920 - 1519]
+        results = model(frame_cropped)
+        annotated_frame = results[0].plot()
 
-    def process_frame(self, img, bbox):
-        results = self.model.predict(img)
-        # show the result image
-        cv2.imshow("Result", results[0].plot())
-        cv2.waitKey(1)
+        fps = fps_counter.update()
+        cv2.putText(annotated_frame, f"FPS: {fps:.2f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
-        objects = []
+        cv2.imshow("OBS Virtual Camera", annotated_frame)
+
+        stars = []
+        bombs = []
         for box in results[0].boxes:
-            cls_id = int(box.cls[0])  # Convert tensor to int
+            cls_id = int(box.cls[0])
             label = results[0].names[cls_id]
-            objects.append({
-                'name': label,
-                'box': box.xyxy[0].tolist()
-            })
-        self.click_on_particles(objects, bbox)
+            if label == 'star':
+                stars.append(box.xyxy[0].tolist())
+            elif label == 'bomb':
+                bombs.append(box.xyxy[0].tolist())
 
-    def bot_loop(self):
-        window = self.find_window()
-        if window:
-            top_offset = 10
-            right_offset = 10
-            left_offset = 10
-            bottom_offset = 10
-            bbox = (window.left + left_offset, window.top + top_offset, window.right - right_offset,
-                    window.bottom - bottom_offset)
-            while self.running:
-                img = self.capture_screen(bbox)
-                self.process_frame(img, bbox)
+        while not queue.empty():
+            queue.get()
 
-    def start_bot(self):
-        if not self.running:
-            self.running = True
-            self.bot_thread = threading.Thread(target=self.bot_loop)
-            self.bot_thread.start()
+        queue.put((stars, bombs))
 
-    def stop_bot(self):
-        self.running = False
-        if hasattr(self, 'bot_thread'):
-            self.bot_thread.join()
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+def click_stars(queue, stop_event):
+    def check_collision(star, bombs):
+        x1_star, y1_star, x2_star, y2_star = star
+        for bomb in bombs:
+            x1_bomb, y1_bomb, x2_bomb, y2_bomb = bomb
+            if not (x2_star < x1_bomb or x1_star > x2_bomb or y2_star < y1_bomb or y1_star > y2_bomb):
+                return True
+        return False
+
+    mouse = MouseController()
+
+    while not stop_event.is_set():
+        if queue.empty():
+            continue
+
+        stars, bombs = queue.get()
+        if stars is None:
+            break
+
+        window = None
+        windows = gw.getAllTitles()
+        for title in windows:
+            if "TelegramDesktop" in title:
+                window = gw.getWindowsWithTitle(title)[0]
+                break
+
+        if not window:
+            print("Window 'TelegramDesktop' not found.")
+            return
+
+        window.activate()
+
+        frame_width, frame_height = 1920 - 1519, 1080 - 368
+        window_width, window_height = window.width, window.height
+
+        x_scale = window_width / frame_width
+        y_scale = window_height / frame_height
+
+        if stars:
+            filtered_stars = stars
+            if bombs:
+                filtered_stars = [star for star in stars if not check_collision(star, bombs)]
+
+            if filtered_stars:
+                star = max(filtered_stars, key=lambda x: x[3])
+                x1, y1, x2, y2 = star
+                x_center = (x1 + x2) / 2
+                y_center = (y1 + y2) / 2
+
+                click_x = window.left + x_center * x_scale
+                click_y = window.top + y_center * y_scale
+
+                print(f"Clicking at ({click_x}, {click_y}) for star centered at ({x_center}, {y_center})")
+                mouse.position = (click_x, click_y)
+                mouse.click(Button.left, 1)
+
+
+def monitor_stop_key(stop_event):
+    keyboard.wait('q')
+    stop_event.set()
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = BotApp(root)
-    root.mainloop()
+    manager = Manager()
+    queue = manager.Queue()
+    stop_event = Event()
+
+    p1 = Process(target=detect_stars, args=(queue, stop_event))
+    p2 = Process(target=click_stars, args=(queue, stop_event))
+
+    p1.start()
+    p2.start()
+
+    stop_thread = threading.Thread(target=monitor_stop_key, args=(stop_event,))
+    stop_thread.start()
+
+    p1.join()
+    queue.put(None)
+    p2.join()
+    stop_thread.join()
