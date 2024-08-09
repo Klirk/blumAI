@@ -156,6 +156,7 @@ def click_stars(queue, stop_event):
 
                     click_count += 1  # Increment click counter
                     print(f"Mouse clicks: {click_count}")  # Print the click count
+                    break
 
 
 def monitor_stop_key(stop_event):
