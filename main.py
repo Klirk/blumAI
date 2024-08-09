@@ -21,7 +21,7 @@ class FPS:
     def update(self):
         self.frames += 1
         elapsed_time = time.time() - self.start_time
-        if (elapsed_time >= 1):
+        if elapsed_time >= 1:
             self.current_fps = self.frames / elapsed_time
             self.start_time = time.time()
             self.frames = 0
@@ -89,7 +89,18 @@ def click_stars(queue, stop_event):
                 return True
         return False
 
+    def is_star_clicked(star, clicked_stars, threshold=10):
+        x1_star, y1_star, x2_star, y2_star = star
+        for clicked_star in clicked_stars:
+            x1_clicked, y1_clicked, x2_clicked, y2_clicked = clicked_star
+            if abs(x1_star - x1_clicked) < threshold and abs(y1_star - y1_clicked) < threshold and \
+                    abs(x2_star - x2_clicked) < threshold and abs(y2_star - y2_clicked) < threshold:
+                return True
+        return False
+
     mouse = MouseController()
+    click_count = 0  # Initialize click counter
+    clicked_stars = []  # List to track clicked stars
 
     while not stop_event.is_set():
         if queue.empty():
@@ -124,17 +135,27 @@ def click_stars(queue, stop_event):
                 filtered_stars = [star for star in stars if not check_collision(star, bombs)]
 
             if filtered_stars:
-                star = max(filtered_stars, key=lambda x: x[3])
-                x1, y1, x2, y2 = star
-                x_center = (x1 + x2) / 2
-                y_center = (y1 + y2) / 2
+                for star in filtered_stars:
+                    if is_star_clicked(star, clicked_stars):
+                        continue
 
-                click_x = window.left + x_center * x_scale
-                click_y = window.top + y_center * y_scale
+                    clicked_stars.append(star)  # Add star to clicked list
+                    if len(clicked_stars) > 50:
+                        clicked_stars.pop(0)  # Remove oldest star from clicked list
 
-                print(f"Clicking at ({click_x}, {click_y}) for star centered at ({x_center}, {y_center})")
-                mouse.position = (click_x, click_y)
-                mouse.click(Button.left, 1)
+                    x1, y1, x2, y2 = star
+                    x_center = (x1 + x2) / 2
+                    y_center = (y1 + y2) / 2
+
+                    click_x = window.left + x_center * x_scale
+                    click_y = window.top + y_center * y_scale
+
+                    print(f"Clicking at ({click_x}, {click_y}) for star centered at ({x_center}, {y_center})")
+                    mouse.position = (click_x, click_y)
+                    mouse.click(Button.left, 1)
+
+                    click_count += 1  # Increment click counter
+                    print(f"Mouse clicks: {click_count}")  # Print the click count
 
 
 def monitor_stop_key(stop_event):
